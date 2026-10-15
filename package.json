@@ -1,6 +1,6 @@
 {
   "name": "safe-cap-table-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "MCP server: SAFE, convertible note, priced round and cap table calculator",
   "main": "dist/server.js",
   "scripts": {

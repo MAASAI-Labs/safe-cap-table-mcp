@@ -56,12 +56,12 @@ The server is stateless (no sessions, JSON responses), so it scales on serverles
 ## Methodology
 
 - Fully diluted (FD) = issued shares + granted options + unallocated pool.
-- Post-money SAFE (YC): cap price = cap / (pre-round FD + pre-money pool increase + all conversion shares). New-money shares excluded. Ownership at conversion ~= amount / cap.
+- Post-money SAFE (YC): cap price = cap / Company Capitalization, where Company Capitalization = pre-round FD + all conversion shares + any pre-money pool increase, but only to the extent promisedOptions exceeds the existing pool (per YC SAFE). New-money shares excluded. Ownership at conversion ~= amount / cap.
 - Pre-money SAFE and notes (default): cap price = cap / pre-round FD (excludes all converting securities and pool increase).
 - Notes convert principal + simple interest (rate x days/365).
 - Discount price = round price x (1 - discount). Holder gets the LOWEST of round, cap and discount prices.
 - MFN SAFE: adopts lowest cap and highest discount among SAFEs listed after it.
-- Pre-money pool: pool top-up counted in pre-money price (dilutes existing holders and pre-money instruments, not new investors or post-money SAFEs).
+- Pre-money pool: pool top-up counted in pre-money price (dilutes existing holders, pre-money instruments, and post-money SAFEs, but not new investors).
 - Post-money pool: top-up issued after pricing; dilutes everyone, including new investors.
 - Target pool % = unallocated pool / post-round FD (before advisor grants).
 - Equity placement fee: shares at round price worth (fee% x new money), priced like new-money shares.
