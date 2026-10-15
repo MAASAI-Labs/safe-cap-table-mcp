@@ -1,5 +1,8 @@
 # SAFE & Cap Table Calculator (MCP server)
 
+**Live MCP URL (Streamable HTTP, no auth):** `https://safe-cap-table-mcp.vercel.app/mcp`  
+Health check: `https://safe-cap-table-mcp.vercel.app/health`
+
 An MCP server that lets Grok Bot (or any MCP client) model startup financings: SAFEs, convertible notes, priced rounds, option pool shuffles, fees, and multi-step financing histories. It returns cap tables before and after, per-holder dilution and fully diluted ownership, as a markdown table plus structured JSON.
 
 It works for any country and any currency, because amounts are unitless and shown with a `$` sign. It needs no API keys, makes no network calls and stores nothing. The math is deterministic.
@@ -45,7 +48,7 @@ Example stdio client config:
 ## Deploy to Vercel
 
 1. Push this repo to GitHub and import it at vercel.com/new (Framework preset: Other). No environment variables are needed.
-2. Vercel serves `api/mcp.ts` as a Node function. `vercel.json` rewrites `/mcp` to `/api/mcp`.
+2. Vercel serves `api/mcp.ts` as a Node function. `vercel.json` rewrites `/mcp` to `/api/mcp` and `/health` to `/api/health`.
 3. Your MCP URL is `https://<project>.vercel.app/mcp`. Check it with `node scripts/smoke.mjs https://<project>.vercel.app/mcp`.
 
 The server is stateless (no sessions, JSON responses), so it scales on serverless without sticky sessions. A GET request returns 405 by design.
