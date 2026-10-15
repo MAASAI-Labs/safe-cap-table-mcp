@@ -16,7 +16,7 @@ const wrap = <T>(fn: (a: T) => any) => async (a: T) => { try { return ok(fn(a));
 // Shapes are passed loosely (z.any-friendly objects) and fully validated inside the engine,
 // so errors are reported as friendly tool errors instead of protocol errors.
 const pricedShape = {
-  capTable: z.array(z.object({ name: z.string(), shares: z.number(), class: z.enum(["common", "preferred", "options", "pool", "other"]).optional() })).describe("Pre-round fully diluted holders. Use class 'pool' for the unallocated option pool."),
+  capTable: z.array(z.object({ name: z.string(), shares: z.number(), class: z.string().optional() })).describe("Pre-round fully diluted holders. Use class 'pool' for the unallocated option pool."),
   safes: z.array(z.object({ name: z.string(), amount: z.number(), type: z.enum(["post-money", "pre-money"]).optional(), valuationCap: z.number().optional(), discount: z.number().optional().describe("fraction, 0.2 = 20%"), mfn: z.boolean().optional() })).optional(),
   notes: z.array(z.object({ name: z.string(), principal: z.number(), annualInterestRate: z.number().optional(), daysOutstanding: z.number().optional(), valuationCap: z.number().optional(), discount: z.number().optional(), capType: z.enum(["pre-money", "post-money"]).optional() })).optional(),
   round: z.object({
@@ -69,6 +69,24 @@ export function createServer() {
     description: "Return the documented conventions and formulas this calculator uses.",
     inputSchema: {}, annotations: ro,
   }, async () => ({ content: [{ type: "text" as const, text: E.METHODOLOGY }] }));
+
+  server.registerTool("pro_rata", {
+    title: "Pro-rata allocation",
+    description: "Amount an investor must buy in a new round to keep its current fully diluted ownership (pro-rata right).",
+    inputSchema: { currentOwnership: z.number().describe("fraction, 0.08 = 8%"), roundSize: z.number() }, annotations: ro,
+  }, wrap((a: any) => E.proRata(a)));
+
+  server.registerTool("fee_schedule", {
+    title: "Placement / advisor fee schedule",
+    description: "Tiered (marginal) success fee, monthly retainer with optional credit against the success fee, minimum fee, and warrant coverage.",
+    inputSchema: { amountRaised: z.number(), tiers: z.array(z.object({ upTo: z.number().nullable(), rate: z.number() })), monthlyRetainer: z.number().optional(), retainerMonths: z.number().optional(), retainerCreditable: z.boolean().optional(), minimumFee: z.number().optional(), warrantCoveragePercent: z.number().optional(), warrantStrikePrice: z.number().optional() }, annotations: ro,
+  }, wrap((a: any) => E.feeSchedule(a)));
+
+  server.registerTool("convert_currency", {
+    title: "Currency label / FX",
+    description: "Format an amount in a currency (ISO code, e.g. NGN, KES, ZAR) using an FX rate (display units per 1 model unit).",
+    inputSchema: { amount: z.number(), currency: z.string().optional(), fxRate: z.number().optional() }, annotations: ro,
+  }, wrap((a: any) => { const formatted = E.formatMoney(a.amount, a.currency ?? "USD", a.fxRate ?? 1); return { formatted, markdown: formatted }; }));
 
   return server;
 }
