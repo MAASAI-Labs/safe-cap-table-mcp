@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as E from "./engine.js";
 
-const VERSION = "1.0.0";
+const VERSION = "1.0.1";
 
 function ok(result: { markdown: string } & Record<string, unknown>) {
   return { content: [{ type: "text" as const, text: result.markdown }, { type: "text" as const, text: "```json\n" + JSON.stringify({ ...result, markdown: undefined }, null, 2) + "\n```" }] };
@@ -24,6 +24,7 @@ const pricedShape = {
     newInvestors: z.array(z.object({ name: z.string(), amount: z.number() })).optional(),
     targetPoolPercent: z.number().optional().describe("unallocated pool as fraction of post-money FD, e.g. 0.1"),
     poolTiming: z.enum(["pre-money", "post-money"]).optional(),
+    promisedOptions: z.number().optional().describe("number of options promised to employees; per YC post-money SAFE, only max(0, promisedOptions - existingPool) of any pool increase is included in Company Capitalization"),
     fees: z.object({ placementCashPercent: z.number().optional(), placementEquityPercent: z.number().optional(), placementAgentName: z.string().optional(), fixedCashFees: z.number().optional() }).optional(),
     pricePrecision: z.number().optional(),
   }),

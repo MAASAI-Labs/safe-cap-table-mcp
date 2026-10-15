@@ -31,14 +31,21 @@ describe("post-money SAFE (YC worked examples)", () => {
     expect(row(r, "Seed SAFE").pctAfter).toBeCloseTo(0.08, 6);
     expect(row(r, "Founders").pctAfter).toBeCloseTo(0.648, 6);
   });
-  it("post-money SAFE is NOT diluted by a pre-money pool top-up (holds 10% of pre-money capitalization)", () => {
+  it("post-money SAFE cap price defaults to excluding pre-money pool top-up (per YC SAFE v1.0.1)", () => {
+    // Without promisedOptions, pool top-up is NOT included in Company Capitalization
     const r = E.modelPricedRound({ capTable: base,
       safes: [{ name: "Seed SAFE", amount: 1_000_000, valuationCap: 10_000_000 }],
       round: { preMoneyValuation: 40_000_000, newInvestors: [{ name: "A", amount: 10_000_000 }], targetPoolPercent: 0.15 } });
-    const safe = row(r, "Seed SAFE").after, pool = r.capTable.find((x: any) => x.class === "pool")!.after;
-    const preMoneyCap = 10_000_000 + safe + r.summary.poolTopUpShares;
-    expect(safe / preMoneyCap).toBeCloseTo(0.1, 6);
+    const safe = row(r, "Seed SAFE").after;
+    const pool = r.capTable.find((x: any) => x.class === "pool")!.after;
+    // SAFE cap price should be calculated without the pool top-up, so SAFE gets a better price
+    // Company Cap = 10M (base) + safe shares (not including pool top-up)
+    // SAFE owns $1M / $10M = 10% of Company Capitalization at conversion
+    const companyCap = 10_000_000 + safe;
+    expect(safe / companyCap).toBeCloseTo(0.1, 6);
+    // But final ownership is diluted by the pool that was added after
     expect(pool / r.summary.sharesAfter).toBeCloseTo(0.15, 6);
+    expect(row(r, "Seed SAFE").pctAfter).toBeLessThan(0.1); // Less than 10% of final shares
   });
   it("cap vs discount best-of picks discount when round price is low", () => {
     const r = E.safeConversion({ amount: 100_000, roundPricePerShare: 1, valuationCap: 20_000_000, capitalizationShares: 10_000_000, discount: 0.2 });
@@ -132,6 +139,87 @@ describe("sequences (extension SAFEs at different caps, tranches)", () => {
     expect(seed.after / ext.after).toBeCloseTo(2, 5);
     expect(r.outstandingInstruments).toEqual([]);
     expect(r.steps).toHaveLength(4);
+  });
+});
+
+describe("post-money SAFE with pre-money pool (hotfix 1.0.1)", () => {
+  it("post-money SAFE cap price should exclude full pre-money pool top-up per YC SAFE definition", () => {
+    // Bug reproduction: founders 10M, no pool; 4 post-money SAFEs; Series A $3M @ $12M pre, 10% pool pre-money
+    // Before fix: founders 39.89%, $1M SAFE 16.0%
+    // After fix: founders 43.65%, $1M SAFE 14.0%, Series A 20.0%, pool 10.0%
+    const r = E.modelPricedRound({
+      capTable: [{ name: "Founders", shares: 10_000_000, class: "common" }],
+      safes: [
+        { name: "$1M SAFE", amount: 1_000_000, valuationCap: 5_000_000 },
+        { name: "$500k SAFE", amount: 500_000, valuationCap: 5_000_000 },
+        { name: "$25k SAFE", amount: 25_000, valuationCap: 5_000_000 },
+        { name: "$500k SAFE #2", amount: 500_000, valuationCap: 7_000_000 },
+      ],
+      round: {
+        roundName: "Series A",
+        preMoneyValuation: 12_000_000,
+        newInvestors: [{ name: "Series A", amount: 3_000_000 }],
+        targetPoolPercent: 0.1,
+        poolTiming: "pre-money",
+      },
+    });
+    
+    // Tolerance: 0.01 percentage points (0.0001 as fraction)
+    const founders = row(r, "Founders");
+    const safe1m = row(r, "$1M SAFE");
+    const seriesA = row(r, "Series A");
+    const pool = r.capTable.find((x: any) => x.class === "pool")!;
+    
+    expect(founders.pctAfter).toBeCloseTo(0.4365, 4); // 43.65%
+    expect(safe1m.pctAfter).toBeCloseTo(0.14, 4);     // 14.0%
+    expect(seriesA.pctAfter).toBeCloseTo(0.20, 4);    // 20.0%
+    expect(pool.pctAfter).toBeCloseTo(0.10, 4);       // 10.0%
+  });
+
+  it("promisedOptions parameter limits pool inclusion in post-money SAFE cap price", () => {
+    // With promisedOptions < existingPool: no pool counted in cap price
+    const r1 = E.modelPricedRound({
+      capTable: [
+        { name: "Founders", shares: 9_000_000, class: "common" },
+        { name: "Pool", shares: 1_000_000, class: "pool" },
+      ],
+      safes: [{ name: "SAFE", amount: 1_000_000, valuationCap: 10_000_000 }],
+      round: {
+        preMoneyValuation: 20_000_000,
+        newInvestors: [{ name: "A", amount: 5_000_000 }],
+        targetPoolPercent: 0.15,
+        poolTiming: "pre-money",
+        promisedOptions: 500_000, // Less than existing 1M pool
+      },
+    });
+    
+    // SAFE owns 10% of Company Capitalization (E + S, excluding pool top-up)
+    const safe1 = row(r1, "SAFE");
+    const companyCap1 = 10_000_000 + safe1.after;
+    expect(safe1.after / companyCap1).toBeCloseTo(0.1, 4);
+    // But final ownership is less because pool was added after
+    expect(safe1.pctAfter).toBeCloseTo(0.0714, 3);
+    
+    // With promisedOptions > existingPool + topup: full top-up counted in cap price
+    const r2 = E.modelPricedRound({
+      capTable: [
+        { name: "Founders", shares: 9_000_000, class: "common" },
+        { name: "Pool", shares: 1_000_000, class: "pool" },
+      ],
+      safes: [{ name: "SAFE", amount: 1_000_000, valuationCap: 10_000_000 }],
+      round: {
+        preMoneyValuation: 20_000_000,
+        newInvestors: [{ name: "A", amount: 5_000_000 }],
+        targetPoolPercent: 0.15,
+        poolTiming: "pre-money",
+        promisedOptions: 3_000_000, // More than existing + top-up
+      },
+    });
+    
+    // SAFE cap price includes the full pool top-up, so SAFE owns less of Company Cap
+    const safe2 = row(r2, "SAFE");
+    const companyCap2 = 10_000_000 + r2.summary.poolTopUpShares + safe2.after;
+    expect(safe2.after / companyCap2).toBeLessThan(0.1);
   });
 });
 
