@@ -30,10 +30,18 @@ describe("AEON flagship: US$1.5M @ US$5M post cap, then US$500k extension @ US$7
       { type: "tranche", name: "T2", investors: [{ name: "Lead", amount: 1e6 }], pricePerShare: 2 },
     ] });
     const g = (n: string) => r.capTable.find(x => x.name === n)!;
-    // After v1.0.1 fix: pool top-up correctly dilutes SAFEs per YC SAFE definition
-    // SAFEs no longer maintain their pre-round percentage due to pool exclusion from cap price
-    expect(g("AEON").pctAfter).toBeCloseTo(0.2269, 4); // ~22.69%
-    expect(g("AEON ext").pctAfter).toBeCloseTo(0.054, 3); // ~5.40%
+    
+    // Company Capitalization (per YC SAFE, v1.0.1: excludes pool top-up when promisedOptions not specified)
+    const companyCap = 10_000_000 + g("AEON").after + g("AEON ext").after;
+    expect(g("AEON").after / companyCap).toBeCloseTo(0.3, 12); // 30.00% of Company Cap
+    expect(g("AEON ext").after / companyCap).toBeCloseTo(1 / 14, 7); // 7.142857% of Company Cap (7 decimals due to iteration rounding)
+    
+    // Post-round fully-diluted ownership (after pool top-up, new money, advisor):
+    // Founders: 9,000,000; AEON: 4,772,727; AEON ext: 1,136,363; Lead: 3,888,429; Adv: 205,359; Pool: 2,033,057
+    // Total FD: 21,035,935
+    expect(g("AEON").pctAfter).toBeCloseTo(4772727 / 21035935, 6); // 22.69%
+    expect(g("AEON ext").pctAfter).toBeCloseTo(1136363 / 21035935, 6); // 5.40%
+    
     expect(g("Adv").class).toBe("common (advisor)");
     expect(r.capTable.reduce((a, x) => a + x.pctAfter, 0)).toBeCloseTo(1, 12);
   });
