@@ -236,3 +236,174 @@ describe("validation", () => {
     expect(r.markdown).toContain("| Holder | Class |");
   });
 });
+
+describe("scenario tokens (phase 2)", () => {
+  it("model_priced_round returns a scenarioToken", () => {
+    const r = E.modelPricedRound({ capTable: base, round: { pricePerShare: 1, newInvestors: [{ name: "A", amount: 1_000_000 }] } });
+    expect(r.scenarioToken).toBeTruthy();
+    expect(r.scenarioToken).toMatch(/^sct1\.priced_round\./);
+  });
+
+  it("model_round_sequence returns a scenarioToken", () => {
+    const r = E.modelSequence({ capTable: base, events: [
+      { type: "safe", safe: { name: "S", amount: 1_000_000, valuationCap: 10_000_000 } },
+      { type: "priced_round", round: { preMoneyValuation: 40_000_000, newInvestors: [{ name: "A", amount: 5_000_000 }] } },
+    ] });
+    expect(r.scenarioToken).toBeTruthy();
+    expect(r.scenarioToken).toMatch(/^sct1\.sequence\./);
+  });
+
+  it("compare_pool_timing returns a scenarioToken", () => {
+    const r = E.comparePoolTiming({ capTable: base, round: { preMoneyValuation: 8_000_000, newInvestors: [{ name: "A", amount: 2_000_000 }], targetPoolPercent: 0.1 } });
+    expect(r.scenarioToken).toBeTruthy();
+    expect(r.scenarioToken).toMatch(/^sct1\.pool_timing\./);
+  });
+
+  it("lossless token round-trip for priced_round", () => {
+    const input = { capTable: base, round: { preMoneyValuation: 40_000_000, newInvestors: [{ name: "Series A", amount: 10_000_000 }] } };
+    const r1 = E.modelPricedRound(input);
+    const r2 = E.loadScenario({ scenarioToken: r1.scenarioToken });
+    
+    expect(r2.summary.pricePerShare).toBe(r1.summary.pricePerShare);
+    expect(r2.summary.postMoneyValuation).toBe(r1.summary.postMoneyValuation);
+    expect(r2.capTable).toEqual(r1.capTable);
+  });
+
+  it("lossless token round-trip for sequence", () => {
+    const input = { capTable: base, events: [
+      { type: "safe", safe: { name: "Seed", amount: 1_000_000, valuationCap: 10_000_000 } },
+      { type: "priced_round", round: { preMoneyValuation: 40_000_000, newInvestors: [{ name: "A", amount: 8_000_000 }] } },
+    ] };
+    const r1 = E.modelSequence(input);
+    const r2 = E.loadScenario({ scenarioToken: r1.scenarioToken });
+    
+    expect(r2.capTable).toEqual(r1.capTable);
+    expect(r2.steps.length).toBe(r1.steps.length);
+  });
+
+  it("rejects unknown token version", () => {
+    expect(() => E.loadScenario({ scenarioToken: "sct2.priced_round.abc" })).toThrow(/Unknown scenario token version/);
+  });
+
+  it("rejects corrupt token", () => {
+    expect(() => E.loadScenario({ scenarioToken: "sct1.priced_round.!@#$%^&*()" })).toThrow(/Corrupt scenario token/);
+  });
+
+  it("rejects unknown scenario type", () => {
+    expect(() => E.loadScenario({ scenarioToken: "sct1.unknown_type.dGVzdA" })).toThrow(/Unknown scenario type/);
+  });
+});
+
+describe("compare_scenarios (phase 1)", () => {
+  const AEON_BASE = {
+    capTable: [{ name: "Founders", shares: 10_000_000, class: "common" as const }],
+    safes: [
+      { name: "SAFE 1", amount: 1_500_000, valuationCap: 5_000_000 },
+      { name: "SAFE 2", amount: 500_000, valuationCap: 7_000_000 },
+    ],
+    round: {
+      roundName: "Series A",
+      preMoneyValuation: 20_000_000,
+      newInvestors: [{ name: "Series A", amount: 5_000_000 }],
+      targetPoolPercent: 0.1,
+    },
+  };
+
+  it("AEON golden test: compare_scenarios matches compare_pool_timing exactly", () => {
+    // Run compare_pool_timing
+    const poolComp = E.comparePoolTiming(AEON_BASE);
+    
+    // Run compare_scenarios with pre-money and post-money variants
+    const scenComp = E.compareScenarios({
+      scenarios: [
+        { name: "Pool pre-money", scenario: { type: "priced_round", input: { ...AEON_BASE, round: { ...AEON_BASE.round, poolTiming: "pre-money" } } } },
+        { name: "Pool post-money", scenario: { type: "priced_round", input: { ...AEON_BASE, round: { ...AEON_BASE.round, poolTiming: "post-money" } } } },
+      ],
+    });
+    
+    // Extract ownership %s from both
+    const founders = poolComp.rows.find(r => r.name === "Founders")!;
+    const safe1 = poolComp.rows.find(r => r.name === "SAFE 1")!;
+    const safe2 = poolComp.rows.find(r => r.name === "SAFE 2")!;
+    const seriesA = poolComp.rows.find(r => r.name === "Series A")!;
+    
+    const foundersScen = scenComp.comparison.find(r => r.holder === "Founders")!;
+    const safe1Scen = scenComp.comparison.find(r => r.holder === "SAFE 1")!;
+    const safe2Scen = scenComp.comparison.find(r => r.holder === "SAFE 2")!;
+    const seriesAScen = scenComp.comparison.find(r => r.holder === "Series A")!;
+    
+    // Verify founders: 44.00% (pre-money) vs 45.26% (post-money) approx
+    expect(foundersScen["Pool pre-money"]).toBeCloseTo(founders.pctPrePool, 4);
+    expect(foundersScen["Pool post-money"]).toBeCloseTo(founders.pctPostPool, 4);
+    expect(founders.pctPrePool).toBeCloseTo(0.44, 2);
+    expect(founders.pctPostPool).toBeCloseTo(0.4526, 3);
+    
+    // Verify SAFE 1: 21.00% (pre) vs 21.60% (post) approx
+    expect(safe1Scen["Pool pre-money"]).toBeCloseTo(safe1.pctPrePool, 4);
+    expect(safe1Scen["Pool post-money"]).toBeCloseTo(safe1.pctPostPool, 4);
+    expect(safe1.pctPrePool).toBeCloseTo(0.21, 2);
+    expect(safe1.pctPostPool).toBeCloseTo(0.216, 2);
+    
+    // Verify SAFE 2: 5.00% (pre) vs 5.14% (post) approx
+    expect(safe2Scen["Pool pre-money"]).toBeCloseTo(safe2.pctPrePool, 4);
+    expect(safe2Scen["Pool post-money"]).toBeCloseTo(safe2.pctPostPool, 4);
+    expect(safe2.pctPrePool).toBeCloseTo(0.05, 2);
+    expect(safe2.pctPostPool).toBeCloseTo(0.0514, 3);
+    
+    // Verify Series A: 20.00% (pre) vs 18.00% (post) approx
+    expect(seriesAScen["Pool pre-money"]).toBeCloseTo(seriesA.pctPrePool, 4);
+    expect(seriesAScen["Pool post-money"]).toBeCloseTo(seriesA.pctPostPool, 4);
+    expect(seriesA.pctPrePool).toBeCloseTo(0.20, 2);
+    expect(seriesA.pctPostPool).toBeCloseTo(0.18, 2);
+  });
+
+  it("ownership sums to 100% per column", () => {
+    const comp = E.compareScenarios({
+      scenarios: [
+        { name: "Scenario A", scenario: { type: "priced_round", input: { capTable: base, round: { pricePerShare: 1, newInvestors: [{ name: "Inv", amount: 2_000_000 }] } } } },
+        { name: "Scenario B", scenario: { type: "priced_round", input: { capTable: base, round: { pricePerShare: 2, newInvestors: [{ name: "Inv", amount: 2_000_000 }] } } } },
+      ],
+    });
+    
+    const sumA = comp.comparison.reduce((s, r) => s + (r["Scenario A"] ?? 0), 0);
+    const sumB = comp.comparison.reduce((s, r) => s + (r["Scenario B"] ?? 0), 0);
+    
+    expect(sumA).toBeCloseTo(1.0, 6);
+    expect(sumB).toBeCloseTo(1.0, 6);
+  });
+
+  it("accepts scenario tokens", () => {
+    const r1 = E.modelPricedRound({ capTable: base, round: { pricePerShare: 1, newInvestors: [{ name: "A", amount: 1_000_000 }] } });
+    const r2 = E.modelPricedRound({ capTable: base, round: { pricePerShare: 2, newInvestors: [{ name: "A", amount: 1_000_000 }] } });
+    
+    const comp = E.compareScenarios({
+      scenarios: [
+        { name: "Low price", scenario: { type: "token", scenarioToken: r1.scenarioToken } },
+        { name: "High price", scenario: { type: "token", scenarioToken: r2.scenarioToken } },
+      ],
+    });
+    
+    expect(comp.comparison.length).toBeGreaterThan(0);
+    expect(comp.summaries[0].pricePerShare).toBe(1);
+    expect(comp.summaries[1].pricePerShare).toBe(2);
+  });
+
+  it("validates 2-6 scenarios", () => {
+    expect(() => E.compareScenarios({ scenarios: [{ name: "Only one", scenario: { type: "priced_round", input: {} } }] })).toThrow();
+    expect(() => E.compareScenarios({ scenarios: Array(7).fill({ name: "Too many", scenario: { type: "priced_round", input: {} } }) })).toThrow();
+  });
+
+  it("generates markdown with deltas vs baseline", () => {
+    const comp = E.compareScenarios({
+      scenarios: [
+        { name: "Base", scenario: { type: "priced_round", input: { capTable: base, round: { pricePerShare: 1, newInvestors: [{ name: "A", amount: 1_000_000 }] } } } },
+        { name: "Alt", scenario: { type: "priced_round", input: { capTable: base, round: { pricePerShare: 2, newInvestors: [{ name: "A", amount: 1_000_000 }] } } } },
+      ],
+      baselineName: "Base",
+    });
+    
+    expect(comp.markdown).toContain("Baseline: **Base**");
+    expect(comp.markdown).toContain("Δ vs Base");
+    expect(comp.markdown).toContain("pp");
+  });
+});

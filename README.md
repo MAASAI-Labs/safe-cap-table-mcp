@@ -16,9 +16,22 @@ It works for any country and any currency, because amounts are unitless and show
 | `model_priced_round` | Full round: converts post-money and pre-money SAFEs (cap, discount, MFN) and notes (with interest), issues new-money shares at a pre-money valuation or a fixed price, tops up the option pool (pre-money or post-money), and applies placement fees (cash and equity) and advisor grants |
 | `model_round_sequence` | Runs events in order: SAFEs (including extensions at different caps), notes, priced rounds and milestone tranches at a fixed price or valuation |
 | `compare_pool_timing` | The same round with the pool top-up in the pre-money vs the post-money, showing who bears the dilution |
+| `compare_scenarios` | **New in v1.1**: Compare 2-6 scenarios side-by-side. Each scenario can be a full model input or a scenario token. Returns ownership % per holder, price per share, post-money valuation, and deltas vs baseline (in percentage points) |
+| `load_scenario` | **New in v1.1**: Load and rerun a scenario from a scenario token (returned by modeling tools). Validates, decodes, and reruns the exact same scenario |
 | `explain_methodology` | Returns the formulas and conventions used |
 
 All tools are read-only and idempotent. Invalid input returns a tool error that lists each bad field.
+
+### Scenario tokens (v1.1+)
+
+Modeling tools (`model_priced_round`, `model_round_sequence`, `compare_pool_timing`) now return a `scenarioToken` — a versioned, compressed, base64url-encoded snapshot of the validated input. Tokens are:
+
+- **Portable**: share a scenario by copying the token
+- **Deterministic**: the same input always produces the same token
+- **Self-contained**: no external state or dependencies
+- **Lossless**: `load_scenario` reproduces the exact same result
+
+Use `load_scenario` to rerun a saved scenario later, or pass tokens to `compare_scenarios` to compare multiple scenarios without duplicating full inputs.
 
 ## Example prompts
 
@@ -27,6 +40,8 @@ All tools are read-only and idempotent. Invalid input returns a tool error that 
 - "We have a $500k SAFE at a $6M cap with a 20% discount, a $250k MFN SAFE, and a $300k note at 8% for 18 months with a $5M cap. Convert them all in a $3M round at $12M pre."
 - "Seed SAFE at a $10M cap, then an extension at $20M, then a Series A of $8M at $40M pre, then a second $2M tranche at $5/share. Show the cap table after each step."
 - "Add a 5% cash and 2% equity placement fee, plus an advisor with 0.5% from the pool."
+- **New in v1.1**: "Compare two scenarios: (A) Series A at $15M pre with 10% pre-money pool vs (B) same round with 10% post-money pool. Show founder ownership difference."
+- **New in v1.1**: "Here's my scenario token [sct1.priced_round.xyz...]. Rerun it and show the cap table."
 
 ## Run locally
 
@@ -76,16 +91,18 @@ YC references: Post-Money Safe User Guide (ycombinator.com/documents). A $1M SAF
 No credentials, accounts or API keys are needed.
 
 1. Connect the MCP URL (or run `npm install && npm run build && npm start`, then use `http://localhost:3000/mcp`).
-2. List tools. You should see 6 tools.
+2. List tools. You should see 8 tools (6 from v1.0, plus `compare_scenarios` and `load_scenario` from v1.1).
 3. Call `model_priced_round` with:
    ```json
    {"capTable":[{"name":"Founders","shares":9000000},{"name":"Option pool","shares":1000000,"class":"pool"}],
     "safes":[{"name":"Seed SAFE","amount":1000000,"valuationCap":10000000}],
     "round":{"preMoneyValuation":40000000,"newInvestors":[{"name":"Lead","amount":10000000}]}}
    ```
-   Expected: SAFE converts at $0.90 into 1,111,111 shares, the Series A price is $3.60, Lead holds 20.00%, the SAFE holds 8.00% and Founders hold 64.80%.
+   Expected: SAFE converts at $0.90 into 1,111,111 shares, the Series A price is $3.60, Lead holds 20.00%, the SAFE holds 8.00% and Founders hold 64.80%. The result includes a `scenarioToken` field.
 4. Call `compare_pool_timing` with founders at 10,000,000 shares, $8M pre, $2M raise and `targetPoolPercent: 0.1`. Expected: Founders get 70.00% with a pre-money pool vs 72.00% with a post-money pool. The price is $0.70 vs $0.80.
-5. Send bad input (for example `round: {}`). Expected: a clear validation error, not a crash.
+5. **v1.1 new**: Call `load_scenario` with the `scenarioToken` from step 3. Expected: the same cap table and round summary as the original result.
+6. **v1.1 new**: Call `compare_scenarios` with two scenarios: the example from step 3 at $40M pre, and the same round at $50M pre. Expected: a markdown table showing ownership % for each holder in both scenarios, plus deltas vs baseline.
+7. Send bad input (for example `round: {}`). Expected: a clear validation error, not a crash.
 
 ## Disclaimer
 

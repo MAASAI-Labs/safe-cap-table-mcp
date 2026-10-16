@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as E from "./engine.js";
 
-const VERSION = "1.0.1";
+const VERSION = "1.1.0-dev";
 
 function ok(result: { markdown: string } & Record<string, unknown>) {
   return { content: [{ type: "text" as const, text: result.markdown }, { type: "text" as const, text: "```json\n" + JSON.stringify({ ...result, markdown: undefined }, null, 2) + "\n```" }] };
@@ -70,6 +70,29 @@ export function createServer() {
     description: "Return the documented conventions and formulas this calculator uses.",
     inputSchema: {}, annotations: ro,
   }, async () => ({ content: [{ type: "text" as const, text: E.METHODOLOGY }] }));
+
+  server.registerTool("load_scenario", {
+    title: "Load scenario from token",
+    description: "Decode and rerun a scenario from a scenarioToken (returned by modeling tools). Validates the token, decodes the input, and runs the appropriate model.",
+    inputSchema: { scenarioToken: z.string().min(1).describe("Scenario token from a previous modeling tool result") }, annotations: ro,
+  }, wrap((a: any) => E.loadScenario(a)));
+
+  server.registerTool("compare_scenarios", {
+    title: "Compare multiple scenarios",
+    description: "Compare 2-6 named scenarios side-by-side. Each scenario can be a full model input or a scenario token. Returns a markdown table with holder ownership % per scenario, price per share, post-money valuation, and deltas vs baseline (in percentage points).",
+    inputSchema: {
+      scenarios: z.array(z.object({
+        name: z.string().min(1).describe("Display name for this scenario"),
+        scenario: z.union([
+          z.object({ type: z.literal("priced_round"), input: z.any().describe("Full model_priced_round input") }),
+          z.object({ type: z.literal("sequence"), input: z.any().describe("Full model_round_sequence input") }),
+          z.object({ type: z.literal("pool_timing"), input: z.any().describe("Full compare_pool_timing input") }),
+          z.object({ type: z.literal("token"), scenarioToken: z.string().describe("Scenario token from a previous result") }),
+        ]).describe("Scenario definition: either full input or a token"),
+      })).min(2).max(6).describe("2-6 scenarios to compare"),
+      baselineName: z.string().optional().describe("Name of the baseline scenario for delta calculations (defaults to first scenario)"),
+    }, annotations: ro,
+  }, wrap((a: any) => E.compareScenarios(a)));
 
   return server;
 }
