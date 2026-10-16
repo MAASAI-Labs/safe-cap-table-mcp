@@ -2,7 +2,26 @@ import { describe, it, expect } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/server";
+import { VERSION } from "../src/version";
+import { readFileSync } from "fs";
+import { join } from "path";
+
 async function client() { const [a, b] = InMemoryTransport.createLinkedPair(); const c = new Client({ name: "t", version: "1" }); await Promise.all([createServer().connect(a), c.connect(b)]); return c; }
+
+describe("Version consistency", () => {
+  it("VERSION constant matches package.json", () => {
+    const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf-8"));
+    expect(VERSION).toBe(pkg.version);
+  });
+  
+  it("health endpoint uses VERSION constant", () => {
+    // Verify that health.ts imports and uses the VERSION constant
+    const healthContent = readFileSync(join(process.cwd(), "api/health.ts"), "utf-8");
+    expect(healthContent).toContain('import { VERSION }');
+    expect(healthContent).toContain('version: VERSION');
+  });
+});
+
 describe("MCP tools", () => {
   it("lists new tools", async () => { const t = (await (await client()).listTools()).tools.map(x => x.name); expect(t).toEqual(expect.arrayContaining(["pro_rata", "fee_schedule", "convert_currency"])); });
   it("pro_rata", async () => { const r: any = await (await client()).callTool({ name: "pro_rata", arguments: { currentOwnership: 0.08, roundSize: 5e6 } }); expect(r.content[0].text).toContain("$400,000"); });

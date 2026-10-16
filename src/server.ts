@@ -1,8 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as E from "./engine.js";
-
-const VERSION = "1.1.0-dev";
+import { VERSION } from "./version.js";
 
 function ok(result: { markdown: string } & Record<string, unknown>) {
   return { content: [{ type: "text" as const, text: result.markdown }, { type: "text" as const, text: "```json\n" + JSON.stringify({ ...result, markdown: undefined }, null, 2) + "\n```" }] };
