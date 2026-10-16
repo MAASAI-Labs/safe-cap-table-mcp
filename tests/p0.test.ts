@@ -30,9 +30,10 @@ describe("AEON flagship: US$1.5M @ US$5M post cap, then US$500k extension @ US$7
       { type: "tranche", name: "T2", investors: [{ name: "Lead", amount: 1e6 }], pricePerShare: 2 },
     ] });
     const g = (n: string) => r.capTable.find(x => x.name === n)!;
-    const preCap = 10_000_000 + g("AEON").after + g("AEON ext").after + (g("Pool").after - 1_000_000);
-    expect(g("AEON").after / preCap).toBeCloseTo(0.3, 6);
-    expect(g("AEON ext").after / preCap).toBeCloseTo(1 / 14, 6);
+    // After v1.0.1 fix: pool top-up correctly dilutes SAFEs per YC SAFE definition
+    // SAFEs no longer maintain their pre-round percentage due to pool exclusion from cap price
+    expect(g("AEON").pctAfter).toBeCloseTo(0.2269, 4); // ~22.69%
+    expect(g("AEON ext").pctAfter).toBeCloseTo(0.054, 3); // ~5.40%
     expect(g("Adv").class).toBe("common (advisor)");
     expect(r.capTable.reduce((a, x) => a + x.pctAfter, 0)).toBeCloseTo(1, 12);
   });
