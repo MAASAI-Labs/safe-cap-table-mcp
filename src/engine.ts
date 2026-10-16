@@ -23,7 +23,7 @@ import { z } from "zod";
 export const HolderSchema = z.object({
   name: z.string().min(1),
   shares: z.number().nonnegative(),
-  class: z.enum(["common", "preferred", "options", "pool", "other"]).default("common"),
+  class: z.string().min(1).default("common").describe("common, preferred, options, pool, or any custom label (kept through sequences)"),
 });
 export const SafeSchema = z
   .object({
@@ -87,15 +87,19 @@ const POOL = "Unallocated option pool";
 
 function poolKey(h: { class: string }) { return h.class === "pool"; }
 
+/**
+ * MFN rule (YC MFN SAFE): the holder may adopt the FULL terms of ONE later SAFE, never mix terms.
+ * "Most favourable" = lowest valuation cap (uncapped counts as infinite); ties broken by highest discount.
+ * Later terms are adopted only if strictly more favourable than the MFN SAFE's own terms.
+ */
 export function resolveMfn(safes: z.infer<typeof SafeSchema>[]) {
+  const key = (c?: number, d?: number) => [c ?? Infinity, -(d ?? 0)] as const;
+  const better = (a: readonly [number, number], b: readonly [number, number]) => a[0] < b[0] || (a[0] === b[0] && a[1] < b[1]);
   return safes.map((s, i) => {
     if (!s.mfn) return { ...s };
-    let cap = s.valuationCap, disc = s.discount;
-    for (const later of safes.slice(i + 1)) {
-      if (later.valuationCap !== undefined && (cap === undefined || later.valuationCap < cap)) cap = later.valuationCap;
-      if (later.discount !== undefined && (disc === undefined || later.discount > disc)) disc = later.discount;
-    }
-    return { ...s, valuationCap: cap, discount: disc };
+    let best = key(s.valuationCap, s.discount); let pick: (typeof safes)[number] | undefined;
+    for (const later of safes.slice(i + 1)) { const k = key(later.valuationCap, later.discount); if (better(k, best)) { best = k; pick = later; } }
+    return pick ? { ...s, valuationCap: pick.valuationCap, discount: pick.discount, type: pick.type, mfnAdoptedFrom: pick.name } : { ...s };
   });
 }
 
@@ -303,7 +307,7 @@ export function modelSequence(raw: z.input<typeof SequenceInput>) {
     if (ev.type === "priced_round") {
       const r = modelPricedRound({ capTable: table, safes: pendingSafes, notes: pendingNotes, round: ev.round, advisors: ev.advisors });
       pendingSafes = []; pendingNotes = [];
-      table = r.capTable.filter(x => x.after > 0 || x.class === "pool").map(x => ({ name: x.name, shares: x.after, class: (["common","preferred","options","pool"].includes(x.class) ? x.class : "other") as any }));
+      table = r.capTable.filter(x => x.after > 0 || x.class === "pool").map(x => ({ name: x.name, shares: x.after, class: x.class }));
       steps.push({ event: ev.round.roundName ?? "Priced round", summary: r.summary, markdown: r.markdown });
       continue;
     }
@@ -355,3 +359,42 @@ export const METHODOLOGY = `# Methodology
 - Circular round math solved by deterministic fixed-point iteration; shares rounded down per holder; price unrounded internally.
 - This is a modelling tool, not legal, tax or investment advice. Confirm with counsel and your actual instruments.
 `;
+
+/** Pro-rata right (YC pro rata side letter): buy enough of the new round to keep current FD ownership. */
+export function proRata(i: { currentOwnership: number; roundSize: number; postMoneyValuation?: number }) {
+  if (i.currentOwnership < 0 || i.currentOwnership >= 1) throw new Error("currentOwnership must be in [0,1)");
+  const amount = i.currentOwnership * i.roundSize;
+  return { amount, ownershipIfExercised: i.currentOwnership, markdown: `Pro-rata allocation: **${money(amount)}** of a ${money(i.roundSize)} round keeps ${pct(i.currentOwnership)}.` };
+}
+
+/** Placement/advisor fee schedule: tiered (marginal) success fee, retainer credit, warrant coverage. */
+export const FeeScheduleInput = z.object({
+  amountRaised: z.number().nonnegative(),
+  tiers: z.array(z.object({ upTo: z.number().positive().nullable(), rate: z.number().min(0).lt(1) })).min(1).describe("marginal tiers, ascending; last upTo null = no limit"),
+  monthlyRetainer: z.number().min(0).default(0), retainerMonths: z.number().int().min(0).default(0),
+  retainerCreditable: z.boolean().default(true),
+  minimumFee: z.number().min(0).default(0),
+  warrantCoveragePercent: z.number().min(0).lt(1).default(0), warrantStrikePrice: z.number().positive().optional(),
+});
+export function feeSchedule(raw: z.input<typeof FeeScheduleInput>) {
+  const i = FeeScheduleInput.parse(raw);
+  let prev = 0, success = 0; const breakdown: { band: string; amount: number; fee: number }[] = [];
+  for (const t of i.tiers) {
+    const top = t.upTo ?? Infinity; if (top <= prev) throw new Error("tiers must be ascending");
+    const band = Math.max(0, Math.min(i.amountRaised, top) - prev);
+    if (band > 0) { success += band * t.rate; breakdown.push({ band: `${money(prev)}-${top === Infinity ? "+" : money(top)}`, amount: band, fee: band * t.rate }); }
+    prev = top; if (i.amountRaised <= top) break;
+  }
+  const retainer = i.monthlyRetainer * i.retainerMonths;
+  const successDue = Math.max(i.minimumFee, success) - (i.retainerCreditable ? Math.min(retainer, Math.max(i.minimumFee, success)) : 0);
+  const totalCash = retainer + successDue;
+  const warrantValue = i.amountRaised * i.warrantCoveragePercent;
+  const warrantShares = i.warrantStrikePrice ? Math.floor(warrantValue / i.warrantStrikePrice) : null;
+  return { successFee: success, retainer, successFeeDueAtClose: successDue, totalCashFees: totalCash, effectiveRate: i.amountRaised ? totalCash / i.amountRaised : 0, warrantCoverageValue: warrantValue, warrantShares, breakdown,
+    markdown: `Success fee ${money(success)} (tiered), retainer ${money(retainer)}${i.retainerCreditable ? " credited" : ""}, due at close ${money(successDue)}. Total cash ${money(totalCash)} (${pct(i.amountRaised ? totalCash / i.amountRaised : 0)}). Warrants ${money(warrantValue)}${warrantShares !== null ? ` = ${fmt(warrantShares)} shares` : ""}.` };
+}
+
+/** Currency label + optional FX (rate = units of display currency per 1 model unit). */
+export function formatMoney(amount: number, currency = "USD", fxRate = 1) {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency, maximumFractionDigits: 2 }).format(amount * fxRate);
+}
