@@ -19,6 +19,7 @@
  *   price per share is reported unrounded and rounded to `pricePrecision` decimals.
  */
 import { z } from "zod";
+import { deflateSync, inflateSync } from "zlib";
 
 export const HolderSchema = z.object({
   name: z.string().min(1),
@@ -79,6 +80,66 @@ export const PricedRoundInput = z.object({
   advisors: z.array(AdvisorSchema).default([]),
 });
 export type PricedRoundInputT = z.input<typeof PricedRoundInput>;
+
+// Scenario token utilities (phase 2)
+const SCENARIO_TOKEN_VERSION = "sct1.";
+const MAX_TOKEN_SIZE = 100_000; // bytes
+
+function base64UrlEncode(buf: Buffer): string {
+  return buf.toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
+}
+
+function base64UrlDecode(str: string): Buffer {
+  str = str.replace(/-/g, "+").replace(/_/g, "/");
+  while (str.length % 4) str += "=";
+  return Buffer.from(str, "base64");
+}
+
+export function createScenarioToken(input: any, type: "priced_round" | "sequence" | "pool_timing"): string {
+  // Create canonical JSON by sorting keys recursively
+  const canonical = JSON.stringify(input, (key, value) => {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return Object.keys(value).sort().reduce((sorted: any, k) => {
+        sorted[k] = value[k];
+        return sorted;
+      }, {});
+    }
+    return value;
+  });
+  const compressed = deflateSync(canonical);
+  if (compressed.length > MAX_TOKEN_SIZE) {
+    throw new Error(`Scenario too large for token (${compressed.length} bytes, max ${MAX_TOKEN_SIZE})`);
+  }
+  return SCENARIO_TOKEN_VERSION + type + "." + base64UrlEncode(compressed);
+}
+
+export function decodeScenarioToken(token: string): { type: "priced_round" | "sequence" | "pool_timing"; input: any } {
+  if (!token.startsWith(SCENARIO_TOKEN_VERSION)) {
+    throw new Error(`Unknown scenario token version. Expected ${SCENARIO_TOKEN_VERSION}*, got ${token.slice(0, 20)}...`);
+  }
+  const rest = token.slice(SCENARIO_TOKEN_VERSION.length);
+  const dotIdx = rest.indexOf(".");
+  if (dotIdx === -1) throw new Error("Malformed scenario token: missing type separator");
+  
+  const type = rest.slice(0, dotIdx) as "priced_round" | "sequence" | "pool_timing";
+  const encoded = rest.slice(dotIdx + 1);
+  
+  if (!["priced_round", "sequence", "pool_timing"].includes(type)) {
+    throw new Error(`Unknown scenario type: ${type}`);
+  }
+  
+  try {
+    const compressed = base64UrlDecode(encoded);
+    const json = inflateSync(compressed).toString("utf-8");
+    const input = JSON.parse(json);
+    return { type, input };
+  } catch (e) {
+    throw new Error(`Corrupt scenario token: ${(e as Error).message}`);
+  }
+}
 
 export interface Row { name: string; class: string; before: number; after: number; pctBefore: number; pctAfter: number; dilutionPct: number; }
 export interface ConversionDetail { name: string; kind: "safe" | "note"; amountConverting: number; capPrice: number | null; discountPrice: number | null; conversionPrice: number; method: string; shares: number; effectiveCap?: number; effectiveDiscount?: number; }
@@ -210,7 +271,8 @@ export function modelPricedRound(raw: PricedRoundInputT) {
     poolTiming: round.poolTiming,
     fees: { placementCash, placementEquityShares: eqFeeMoney > 0 ? Math.floor(eqFeeMoney / P) : 0, netProceeds: newMoney - placementCash },
   };
-  return { summary, conversions: detail, capTable: rows, warnings, markdown: renderMarkdown(summary, detail, rows, warnings) };
+  const scenarioToken = createScenarioToken(raw, "priced_round");
+  return { summary, conversions: detail, capTable: rows, warnings, scenarioToken, markdown: renderMarkdown(summary, detail, rows, warnings) };
 }
 
 const fmt = (n: number) => Math.round(n).toLocaleString("en-US");
@@ -328,7 +390,8 @@ export function modelSequence(raw: z.input<typeof SequenceInput>) {
   let md = steps.map(s => s.markdown).join("\n\n") + `\n\n## Final cap table\n\n| Holder | Class | Start | % start | Final | % final | Dilution |\n|---|---|---:|---:|---:|---:|---:|\n`;
   for (const r of rows) md += `| ${r.name} | ${r.class} | ${fmt(r.before)} | ${pct(r.pctBefore)} | ${fmt(r.after)} | ${pct(r.pctAfter)} | ${r.before ? pct(r.dilutionPct) : "new"} |\n`;
   if (unconverted.length) md += `\n> Outstanding (unconverted) instruments: ${unconverted.join(", ")}\n`;
-  return { steps, capTable: rows, outstandingInstruments: unconverted, markdown: md };
+  const scenarioToken = createScenarioToken(raw, "sequence");
+  return { steps, capTable: rows, outstandingInstruments: unconverted, scenarioToken, markdown: md };
 }
 
 /** Run the same round with pre-money vs post-money pool to show who bears the top-up. */
@@ -340,7 +403,210 @@ export function comparePoolTiming(raw: PricedRoundInputT) {
   const rows = pre.capTable.map(r => ({ name: r.name, class: r.class, pctPrePool: r.pctAfter, pctPostPool: post.capTable.find(x => x.name === r.name && x.class === r.class)?.pctAfter ?? 0 }));
   let md = `## Option pool shuffle: pre-money vs post-money top-up to ${pct(base.round.targetPoolPercent)}\n\nPrice/share: pre-money pool **$${pre.summary.pricePerShare}** vs post-money pool **$${post.summary.pricePerShare}**. Effective pre-money for existing holders (excl. pool top-up): ${money(pre.summary.pricePerShareExact * (pre.summary.sharesBefore + pre.conversions.reduce((a, c) => a + c.shares, 0)))} vs ${money(post.summary.preMoneyValuation)}.\n\nA **pre-money pool** top-up dilutes founders and post-money SAFE holders (not new investors). A **post-money pool** dilutes everyone including new investors.\n\n| Holder | Class | % after (pool in pre-money) | % after (pool in post-money) | Difference |\n|---|---|---:|---:|---:|\n`;
   for (const r of rows) md += `| ${r.name} | ${r.class} | ${pct(r.pctPrePool)} | ${pct(r.pctPostPool)} | ${((r.pctPrePool - r.pctPostPool) * 100).toFixed(2)} pp |\n`;
-  return { preMoneyPool: pre.summary, postMoneyPool: post.summary, rows, markdown: md };
+  const scenarioToken = createScenarioToken(raw, "pool_timing");
+  return { preMoneyPool: pre.summary, postMoneyPool: post.summary, rows, scenarioToken, markdown: md };
+}
+
+/** Load and rerun a scenario from a scenario token. */
+export const LoadScenarioInput = z.object({
+  scenarioToken: z.string().min(1),
+});
+export function loadScenario(raw: z.input<typeof LoadScenarioInput>) {
+  const { scenarioToken } = LoadScenarioInput.parse(raw);
+  const { type, input } = decodeScenarioToken(scenarioToken);
+  
+  switch (type) {
+    case "priced_round":
+      return modelPricedRound(input);
+    case "sequence":
+      return modelSequence(input);
+    case "pool_timing":
+      return comparePoolTiming(input);
+    default:
+      throw new Error(`Unknown scenario type: ${type}`);
+  }
+}
+
+/** Compare multiple scenarios side-by-side. */
+export const ScenarioInput = z.union([
+  z.object({ type: z.literal("priced_round"), input: z.any() }),
+  z.object({ type: z.literal("sequence"), input: z.any() }),
+  z.object({ type: z.literal("pool_timing"), input: z.any() }),
+  z.object({ type: z.literal("token"), scenarioToken: z.string() }),
+]);
+export const CompareScenariosInput = z.object({
+  scenarios: z.array(z.object({
+    name: z.string().min(1),
+    scenario: ScenarioInput,
+  })).min(2).max(6),
+  baselineName: z.string().optional(),
+});
+export function compareScenarios(raw: z.input<typeof CompareScenariosInput>) {
+  const input = CompareScenariosInput.parse(raw);
+  
+  // Run each scenario
+  const results: { name: string; result: any }[] = [];
+  for (const s of input.scenarios) {
+    let result: any;
+    if (s.scenario.type === "token") {
+      result = loadScenario({ scenarioToken: s.scenario.scenarioToken });
+    } else if (s.scenario.type === "priced_round") {
+      result = modelPricedRound(s.scenario.input);
+    } else if (s.scenario.type === "sequence") {
+      result = modelSequence(s.scenario.input);
+    } else {
+      result = comparePoolTiming(s.scenario.input);
+    }
+    results.push({ name: s.name, result });
+  }
+  
+  // Extract cap tables and find all unique holders
+  const capTables = results.map(r => {
+    // For sequence results, use capTable; for priced_round, use capTable; for pool_timing, extract from rows
+    if (r.result.capTable) return r.result.capTable;
+    if (r.result.rows) {
+      // pool_timing format: convert to standard cap table format
+      return r.result.rows.map((row: any) => ({ name: row.name, class: row.class, pctAfter: row.pctPrePool }));
+    }
+    throw new Error(`Unexpected result format for scenario ${r.name}`);
+  });
+  
+  // Collect all unique holder names across all scenarios
+  const allHolders = new Set<string>();
+  capTables.forEach(ct => {
+    ct.forEach((h: any) => {
+      const key = h.name;
+      allHolders.add(key);
+    });
+  });
+  
+  // Build comparison table
+  const baselineIdx = input.baselineName 
+    ? results.findIndex(r => r.name === input.baselineName)
+    : 0;
+  if (baselineIdx === -1) throw new Error(`Baseline scenario "${input.baselineName}" not found`);
+  
+  const comparisonRows: any[] = [];
+  for (const holderName of allHolders) {
+    const row: any = { holder: holderName };
+    
+    for (let i = 0; i < results.length; i++) {
+      const ct = capTables[i];
+      const holder = ct.find((h: any) => h.name === holderName);
+      const pct = holder?.pctAfter ?? 0;
+      row[results[i].name] = pct;
+      
+      // Calculate delta vs baseline
+      if (i !== baselineIdx) {
+        const baseHolder = capTables[baselineIdx].find((h: any) => h.name === holderName);
+        const basePct = baseHolder?.pctAfter ?? 0;
+        row[`${results[i].name}_delta`] = pct - basePct;
+      }
+    }
+    
+    comparisonRows.push(row);
+  }
+  
+  // Extract summary data (price per share, post-money, dilution)
+  const summaries = results.map(r => {
+    const res = r.result;
+    // For priced_round and sequence with steps that have summaries
+    if (res.summary) {
+      return {
+        name: r.name,
+        pricePerShare: res.summary.pricePerShare,
+        postMoneyValuation: res.summary.postMoneyValuation,
+      };
+    }
+    // For pool_timing
+    if (res.preMoneyPool) {
+      return {
+        name: r.name,
+        pricePerShare: res.preMoneyPool.pricePerShare,
+        postMoneyValuation: res.preMoneyPool.postMoneyValuation,
+      };
+    }
+    // For sequence, use the last step's summary if available
+    if (res.steps && res.steps.length > 0) {
+      const lastStep = res.steps[res.steps.length - 1];
+      if (lastStep.summary) {
+        return {
+          name: r.name,
+          pricePerShare: lastStep.summary.pricePerShare,
+          postMoneyValuation: lastStep.summary.postMoneyValuation,
+        };
+      }
+    }
+    return { name: r.name, pricePerShare: null, postMoneyValuation: null };
+  });
+  
+  // Find biggest differences
+  const baselineName = results[baselineIdx].name;
+  const differences: string[] = [];
+  comparisonRows.forEach(row => {
+    const baselinePct = row[baselineName] ?? 0;
+    for (let i = 0; i < results.length; i++) {
+      if (i === baselineIdx) continue;
+      const name = results[i].name;
+      const pct = row[name] ?? 0;
+      const delta = pct - baselinePct;
+      if (Math.abs(delta) >= 0.01) { // >= 1 pp difference
+        differences.push(`${row.holder}: ${name} vs ${baselineName} = ${(delta * 100).toFixed(2)} pp`);
+      }
+    }
+  });
+  
+  // Sort differences by magnitude
+  differences.sort((a, b) => {
+    const aMatch = a.match(/([-\d.]+) pp/);
+    const bMatch = b.match(/([-\d.]+) pp/);
+    const aMag = aMatch ? Math.abs(parseFloat(aMatch[1])) : 0;
+    const bMag = bMatch ? Math.abs(parseFloat(bMatch[1])) : 0;
+    return bMag - aMag;
+  });
+  
+  // Generate markdown table
+  let md = `## Scenario comparison\n\nBaseline: **${baselineName}**\n\n`;
+  md += `### Ownership comparison\n\n`;
+  md += `| Holder | ${results.map(r => r.name).join(" | ")} | ${results.filter((_, i) => i !== baselineIdx).map(r => `Δ vs ${baselineName}`).join(" | ")} |\n`;
+  md += `|---|${results.map(() => "---:").join("|")}|${results.filter((_, i) => i !== baselineIdx).map(() => "---:").join("|")}|\n`;
+  
+  for (const row of comparisonRows) {
+    md += `| ${row.holder} |`;
+    for (const r of results) {
+      md += ` ${pct(row[r.name] ?? 0)} |`;
+    }
+    for (let i = 0; i < results.length; i++) {
+      if (i !== baselineIdx) {
+        const delta = row[`${results[i].name}_delta`] ?? 0;
+        md += ` ${delta >= 0 ? "+" : ""}${(delta * 100).toFixed(2)} pp |`;
+      }
+    }
+    md += "\n";
+  }
+  
+  md += `\n### Round summary\n\n`;
+  md += `| Scenario | Price/share | Post-money valuation |\n|---|---:|---:|\n`;
+  for (const s of summaries) {
+    const price = s.pricePerShare !== null ? `$${s.pricePerShare}` : "n/a";
+    const postMoney = s.postMoneyValuation !== null ? money(s.postMoneyValuation) : "n/a";
+    md += `| ${s.name} | ${price} | ${postMoney} |\n`;
+  }
+  
+  md += `\n### Key differences\n\n`;
+  if (differences.length === 0) {
+    md += `No significant ownership differences (< 1 pp) between scenarios.\n`;
+  } else {
+    const top5 = differences.slice(0, 5);
+    for (const diff of top5) {
+      md += `- ${diff}\n`;
+    }
+    if (differences.length > 5) {
+      md += `\n... and ${differences.length - 5} more differences.\n`;
+    }
+  }
+  
+  return { comparison: comparisonRows, summaries, keyDifferences: differences.slice(0, 10), markdown: md };
 }
 
 export const METHODOLOGY = `# Methodology
@@ -358,6 +624,7 @@ export const METHODOLOGY = `# Methodology
 - Advisor grants: issued after close; fromPool=true reduces unallocated pool, otherwise new shares (percent sized so advisor holds that % of final FD).
 - Circular round math solved by deterministic fixed-point iteration; shares rounded down per holder; price unrounded internally.
 - This is a modelling tool, not legal, tax or investment advice. Confirm with counsel and your actual instruments.
+- **Scenario tokens** (v1.1+): modeling tools return a scenarioToken — a versioned, compressed, base64url-encoded snapshot of the validated input. Load it with load_scenario to rerun the exact same scenario later, or pass it to compare_scenarios to compare multiple scenarios side-by-side. Tokens are portable, deterministic, and self-contained.
 `;
 
 /** Pro-rata right (YC pro rata side letter): buy enough of the new round to keep current FD ownership. */
