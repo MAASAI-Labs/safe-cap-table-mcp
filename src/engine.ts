@@ -4,8 +4,9 @@
  * Conventions (see README "Methodology"):
  * - All share counts are "fully diluted": issued shares + granted options + unallocated pool.
  * - Post-money SAFE (YC 2018+): cap price = postMoneyCap / CompanyCapitalization, where
- *   CompanyCapitalization = all pre-round shares + options + pool (incl. any pre-money pool
- *   increase made for the round) + ALL shares issued on conversion of SAFEs/notes.
+ *   CompanyCapitalization = all pre-round shares + options + pool + ALL shares issued on
+ *   conversion of SAFEs/notes. Any pre-money pool increase is included only to the extent
+ *   that promisedOptions exceeds the pre-existing pool (per YC SAFE definition).
  *   New-money shares are excluded.
  * - Pre-money SAFE / notes: cap price = valuationCap / pre-round fully diluted capitalization
  *   (excluding all converting securities and any new pool increase).
@@ -64,6 +65,7 @@ export const RoundSchema = z.object({
   newInvestors: z.array(InvestorSchema).default([]),
   targetPoolPercent: z.number().min(0).lt(1).optional().describe("unallocated pool target as fraction of post-money FD"),
   poolTiming: z.enum(["pre-money", "post-money"]).default("pre-money"),
+  promisedOptions: z.number().nonnegative().optional().describe("number of options promised to employees; per YC post-money SAFE, only max(0, promisedOptions - existingPool) of any pool increase is included in Company Capitalization"),
   fees: FeesSchema,
   pricePrecision: z.number().int().min(0).max(10).default(6),
 }).refine(r => (r.preMoneyValuation === undefined) !== (r.pricePerShare === undefined), {
@@ -128,9 +130,13 @@ export function modelPricedRound(raw: PricedRoundInputT) {
   for (let iter = 0; iter < 10000; iter++) {
     const sumS = S.reduce((a, b) => a + b, 0);
     const pricedT = prePool ? T : 0;
+    // Per YC post-money SAFE: pool increase is only included in Company Capitalization
+    // "to the extent that the number of Promised Options exceeds the Unissued Option Pool prior to such increase"
+    const promisedOptions = round.promisedOptions ?? 0;
+    const poolForPostMoneyCap = prePool ? Math.max(0, Math.min(promisedOptions - existingPool, T)) : 0;
     const newP = round.pricePerShare ?? round.preMoneyValuation! / (E + pricedT + sumS);
     detail = convs.map(c => {
-      const capPrice = c.cap === undefined ? null : c.post ? c.cap / (E + pricedT + sumS) : c.cap / E;
+      const capPrice = c.cap === undefined ? null : c.post ? c.cap / (E + poolForPostMoneyCap + sumS) : c.cap / E;
       const discountPrice = c.discount === undefined ? null : newP * (1 - c.discount);
       const cands: [number, string][] = [[newP, "round price"]];
       if (capPrice !== null) cands.push([capPrice, "valuation cap"]);
@@ -332,7 +338,7 @@ export function comparePoolTiming(raw: PricedRoundInputT) {
   const pre = modelPricedRound({ ...raw, round: { ...(raw.round as any), poolTiming: "pre-money" } });
   const post = modelPricedRound({ ...raw, round: { ...(raw.round as any), poolTiming: "post-money" } });
   const rows = pre.capTable.map(r => ({ name: r.name, class: r.class, pctPrePool: r.pctAfter, pctPostPool: post.capTable.find(x => x.name === r.name && x.class === r.class)?.pctAfter ?? 0 }));
-  let md = `## Option pool shuffle: pre-money vs post-money top-up to ${pct(base.round.targetPoolPercent)}\n\nPrice/share: pre-money pool **$${pre.summary.pricePerShare}** vs post-money pool **$${post.summary.pricePerShare}**. Effective pre-money for existing holders (excl. pool top-up): ${money(pre.summary.pricePerShareExact * (pre.summary.sharesBefore + pre.conversions.reduce((a, c) => a + c.shares, 0)))} vs ${money(post.summary.preMoneyValuation)}.\n\n| Holder | Class | % after (pool in pre-money) | % after (pool in post-money) | Difference |\n|---|---|---:|---:|---:|\n`;
+  let md = `## Option pool shuffle: pre-money vs post-money top-up to ${pct(base.round.targetPoolPercent)}\n\nPrice/share: pre-money pool **$${pre.summary.pricePerShare}** vs post-money pool **$${post.summary.pricePerShare}**. Effective pre-money for existing holders (excl. pool top-up): ${money(pre.summary.pricePerShareExact * (pre.summary.sharesBefore + pre.conversions.reduce((a, c) => a + c.shares, 0)))} vs ${money(post.summary.preMoneyValuation)}.\n\nA **pre-money pool** top-up dilutes founders and post-money SAFE holders (not new investors). A **post-money pool** dilutes everyone including new investors.\n\n| Holder | Class | % after (pool in pre-money) | % after (pool in post-money) | Difference |\n|---|---|---:|---:|---:|\n`;
   for (const r of rows) md += `| ${r.name} | ${r.class} | ${pct(r.pctPrePool)} | ${pct(r.pctPostPool)} | ${((r.pctPrePool - r.pctPostPool) * 100).toFixed(2)} pp |\n`;
   return { preMoneyPool: pre.summary, postMoneyPool: post.summary, rows, markdown: md };
 }
@@ -340,12 +346,12 @@ export function comparePoolTiming(raw: PricedRoundInputT) {
 export const METHODOLOGY = `# Methodology
 
 - Fully diluted (FD) = issued shares + granted options + unallocated pool.
-- Post-money SAFE (YC): cap price = cap / (pre-round FD + pre-money pool increase + all conversion shares). New-money shares excluded. Ownership at conversion ~= amount / cap.
+- Post-money SAFE (YC): cap price = cap / Company Capitalization, where Company Capitalization = pre-round FD + all conversion shares + any pre-money pool increase, but only to the extent promisedOptions exceeds the existing pool (per YC SAFE). New-money shares excluded. Ownership at conversion ~= amount / cap.
 - Pre-money SAFE and notes (default): cap price = cap / pre-round FD (excludes all converting securities and pool increase).
 - Notes convert principal + simple interest (rate x days/365).
 - Discount price = round price x (1 - discount). Holder gets the LOWEST of round, cap and discount prices.
 - MFN SAFE: adopts lowest cap and highest discount among SAFEs listed after it.
-- Pre-money pool: pool top-up counted in pre-money price (dilutes existing holders and pre-money instruments, not new investors or post-money SAFEs).
+- Pre-money pool: pool top-up counted in pre-money price (dilutes existing holders, pre-money instruments, and post-money SAFEs, but not new investors).
 - Post-money pool: top-up issued after pricing; dilutes everyone, including new investors.
 - Target pool % = unallocated pool / post-round FD (before advisor grants).
 - Equity placement fee: shares at round price worth (fee% x new money), priced like new-money shares.
